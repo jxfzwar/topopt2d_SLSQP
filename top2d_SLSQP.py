@@ -10,7 +10,7 @@ import time
 
 #Default input parameters
 class para:
-    nelx = 30
+    nelx = 10
     nely = 10
     volfrac = 0.5
     rmin = 1.5
@@ -18,17 +18,12 @@ class para:
     ft = 0
 
 class eMat:
-    def __init__(self):
-        pass
+    def __init__(self,nelx,nely):
+        self.nelx=nelx
+        self.nely=nely
     def Mat(self):
-        # Default input parameters
-        p = para()
-        nelx = p.nelx
-        nely = p.nely
-        volfrac = p.volfrac
-        rmin = p.rmin
-        penal = p.penal
-        ft = p.ft  # ft==0 -> sens, ft==1 -> dens
+        nelx=self.nelx
+        nely=self.nely
         Mat = np.zeros((nelx * nely, 8), dtype=int)
         for elx in range(nelx):
             for ely in range(nely):
@@ -65,7 +60,7 @@ class FE:
         # dofs:
         ndof = 2 * (nelx + 1) * (nely + 1)
         # FE: Build the index vectors for the for coo matrix format.
-        ee = eMat()
+        ee = eMat(nelx,nely)
         edofMat = ee.Mat()
         # Construct the index pointers for the coo format
         iK = np.kron(edofMat, np.ones((8, 1))).flatten()
@@ -88,6 +83,39 @@ class FE:
         u[free, 0] = spsolve(K, f[free, 0])
         return u
 
+
+class FILTERMATRIX:
+    def __init__(self,nelx,nely,rmin):
+        self.nelx=nelx
+        self.nely=nely
+        self.rmin=rmin
+    def assembly(self):
+        nelx=self.nelx
+        nely=self.nely
+        rmin=self.rmin
+        nfilter = nelx * nely * ((2 * (np.ceil(rmin) - 1) + 1) ** 2)
+        iH = np.zeros(nfilter)
+        jH = np.zeros(nfilter)
+        sH = np.zeros(nfilter)
+        cc = 0
+        for i in range(nelx):
+            for j in range(nely):
+                row = i * nely + j
+                kk1 = int(np.maximum(i - (np.ceil(rmin) - 1), 0))
+                kk2 = int(np.minimum(i + np.ceil(rmin), nelx))
+                ll1 = int(np.maximum(j - (np.ceil(rmin) - 1), 0))
+                ll2 = int(np.minimum(j + np.ceil(rmin), nely))
+                for k in range(kk1, kk2):
+                    for l in range(ll1, ll2):
+                        col = k * nely + l
+                        fac = rmin - np.sqrt(((i - k) * (i - k) + (j - l) * (j - l)))
+                        iH[cc] = row
+                        jH[cc] = col
+                        sH[cc] = np.maximum(0.0, fac)
+                        cc = cc + 1
+        # Finalize assembly and convert to csc format
+        H = coo_matrix((sH, (iH, jH)), shape=(nelx * nely, nelx * nely)).tocsc()
+        return H
 
 
 #Optimization Problem Definition
@@ -114,12 +142,9 @@ def objfunc(xx):
     # FE
     uu = FE(x,nelx,nely,volfrac,rmin,penal,ft,Emin,Emax,KE)
     u = uu.Usolution()
-
-    #t2=time.clock()
-
     # Objective
     ce = np.ones(nely * nelx)
-    ee = eMat()
+    ee = eMat(nelx,nely)
     edofMat = ee.Mat()
     ce[:] = (np.dot(u[edofMat].reshape(nelx * nely, 8), KE) * u[edofMat].reshape(nelx * nely, 8)).sum(1)
     f = ((Emin + x ** penal * (Emax - Emin)) * ce).sum()
@@ -147,42 +172,20 @@ def SENSE(xx,f,g):
     ndof = 2 * (nelx + 1) * (nely + 1)
     # list to array
     x = np.array(xx[0:nely * nelx])
-    nfilter = nelx * nely * ((2 * (np.ceil(rmin) - 1) + 1) ** 2)
-    iH = np.zeros(nfilter)
-    jH = np.zeros(nfilter)
-    sH = np.zeros(nfilter)
-    cc = 0
-    for i in range(nelx):
-        for j in range(nely):
-            row = i * nely + j
-            kk1 = int(np.maximum(i - (np.ceil(rmin) - 1), 0))
-            kk2 = int(np.minimum(i + np.ceil(rmin), nelx))
-            ll1 = int(np.maximum(j - (np.ceil(rmin) - 1), 0))
-            ll2 = int(np.minimum(j + np.ceil(rmin), nely))
-            for k in range(kk1, kk2):
-                for l in range(ll1, ll2):
-                    col = k * nely + l
-                    fac = rmin - np.sqrt(((i - k) * (i - k) + (j - l) * (j - l)))
-                    iH[cc] = row
-                    jH[cc] = col
-                    sH[cc] = np.maximum(0.0, fac)
-                    cc = cc + 1
     # Finalize assembly and convert to csc format
-    H = coo_matrix((sH, (iH, jH)), shape=(nelx * nely, nelx * nely)).tocsc()
+    HH = FILTERMATRIX(nelx,nely,rmin)
+    H = HH.assembly()
     Hs = H.sum(1)
     # KE Matrix
     KE = lk()
     # FE
     uu = FE(x,nelx,nely,volfrac,rmin,penal,ft,Emin,Emax,KE)
     u = uu.Usolution()
-
-    #t4=time.clock()
-
     # sensitivity
     dv = np.ones(nely * nelx)
     dc = np.ones(nely * nelx)
     ce = np.ones(nely * nelx)
-    ee = eMat()
+    ee = eMat(nelx,nely)
     edofMat = ee.Mat()
     ce[:] = (np.dot(u[edofMat].reshape(nelx * nely, 8), KE) * u[edofMat].reshape(nelx * nely, 8)).sum(1)
     dc[:] = (-penal * x ** (penal - 1) * (Emax - Emin)) * ce
@@ -252,7 +255,15 @@ def main():
         opt = pyOpt.SLSQP()
         #new x and obj
         optsol = opt(opt_prob,sens_type=SENSE)
-        x = optsol[1]
+        # Filter design variables
+        # Finalize assembly and convert to csc format
+        HH = FILTERMATRIX(nelx, nely, rmin)
+        H = HH.assembly()
+        Hs = H.sum(1)
+        if ft == 0:
+            x = optsol[1]
+        elif ft == 1:
+            x = np.asarray(H * optsol[1][np.newaxis].T / Hs)[:, 0]
 
         t3=time.clock()
 
